@@ -28,11 +28,37 @@ class LoRALinear(HalfLinear):
 
         # TODO: Implement LoRA, initialize the layers, and make sure they are trainable
         # Keep the LoRA layers in float32
-        raise NotImplementedError()
+        #  raise NotImplementedError()
+        
+        # fp16 used by the base half-percision linear
+        self.linear_dtype = self.weight.dtype
+
+        # LoRA layers uses default float32 for training
+        self.lora_a = torch.nn.Linear(in_features, lora_dim, bias=False)
+        self.lora_b = torch.nn.Linear(lora_dim, out_features, bias=False)
+        
+        # initialization: A -> small random, B -> zeros 
+        torch.nn.init.normal_(self.lora_a.weight, mean=0.0, std=0.02)
+        torch.nn.init.zeros_(self.lora_b.weight)
+
+        # make LoRA params trainable
+        self.lora_a.requires_grad_(True)
+        self.lora_b.requires_grad_(True)
+              
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # TODO: Forward. Make sure to cast inputs to self.linear_dtype and the output back to x.dtype
-        raise NotImplementedError()
+        # raise NotImplementedError()
+        x_half = x.to(self.linear_dtype)
+        base_half = torch.nn.functional.linear(x_half, self.weight, self.bias)
+        base = base_half.to(x.dtype)
+
+        x_fp32 = x.to(torch.float32)
+        delta = self.lora_b(self.lora_a(x_fp32)).to(x.dtype)
+
+        return base + delta
+
+
 
 
 class LoraBigNet(torch.nn.Module):
@@ -40,7 +66,14 @@ class LoraBigNet(torch.nn.Module):
         def __init__(self, channels: int, lora_dim: int):
             super().__init__()
             # TODO: Implement me (feel free to copy and reuse code from bignet.py)
-            raise NotImplementedError()
+            # raise NotImplementedError()
+            self.model = torch.nn.Sequential(
+                LoRALinear(channels, channels, lora_dim),
+                torch.nn.ReLU(),
+                LoRALinear(channels, channels, lora_dim),
+                torch.nn.ReLU(),
+                LoRALinear(channels, channels, lora_dim),
+            )
 
         def forward(self, x: torch.Tensor):
             return self.model(x) + x
@@ -48,8 +81,20 @@ class LoraBigNet(torch.nn.Module):
     def __init__(self, lora_dim: int = 32):
         super().__init__()
         # TODO: Implement me (feel free to copy and reuse code from bignet.py)
-        raise NotImplementedError()
-
+        # raise NotImplementedError()
+        self.model = torch.nn.Sequential(
+            self.Block(BIGNET_DIM, lora_dim),
+            LayerNorm(BIGNET_DIM),
+            self.Block(BIGNET_DIM, lora_dim),
+            LayerNorm(BIGNET_DIM),
+            self.Block(BIGNET_DIM, lora_dim),
+            LayerNorm(BIGNET_DIM),
+            self.Block(BIGNET_DIM, lora_dim),
+            LayerNorm(BIGNET_DIM),
+            self.Block(BIGNET_DIM, lora_dim),
+            LayerNorm(BIGNET_DIM),
+            self.Block(BIGNET_DIM, lora_dim),
+        )
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
 
