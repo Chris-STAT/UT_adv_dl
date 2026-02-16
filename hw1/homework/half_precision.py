@@ -18,13 +18,24 @@ class HalfLinear(torch.nn.Linear):
         Feel free to set self.requires_grad_ to False, we will not backpropagate through this layer.
         """
         # TODO: Implement me
-        raise NotImplementedError()
+        # raise NotImplementedError()
+        super().__init__(in_features, out_features, bias=bias)
+
+        self.weight.data = self.weight.data.to(torch.float16)
+        if self.bias is not None:
+            self.bias.data = self.bias.data.to(torch.float16)
+
+        self.requires_grad_(False)      
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Hint: Use the .to method to cast a tensor to a different dtype (i.e. torch.float16 or x.dtype)
         # The input and output should be of x.dtype = torch.float32
         # TODO: Implement me
-        raise NotImplementedError()
+        # raise NotImplementedError()
+        x_half = x.to(torch.float16)
+        y_half = torch.nn.functional.linear(x_half, self.weight, self.bias)
+        return y_half.to(x.dtype)         
 
 
 class HalfBigNet(torch.nn.Module):
@@ -37,7 +48,14 @@ class HalfBigNet(torch.nn.Module):
         def __init__(self, channels: int):
             super().__init__()
             # TODO: Implement me (feel free to copy and reuse code from bignet.py)
-            raise NotImplementedError()
+            # raise NotImplementedError()
+            self.model = torch.nn.Sequential(
+                HalfLinear(channels, channels),
+                torch.nn.ReLU(),
+                HalfLinear(channels, channels),
+                torch.nn.ReLU(),
+                HalfLinear(channels, channels),
+            )
 
         def forward(self, x: torch.Tensor):
             return self.model(x) + x
@@ -45,7 +63,20 @@ class HalfBigNet(torch.nn.Module):
     def __init__(self):
         super().__init__()
         # TODO: Implement me (feel free to copy and reuse code from bignet.py)
-        raise NotImplementedError()
+        # raise NotImplementedError()
+        self.model = torch.nn.Sequential(
+            self.Block(BIGNET_DIM),
+            LayerNorm(BIGNET_DIM),  # stays fp32 by default
+            self.Block(BIGNET_DIM),
+            LayerNorm(BIGNET_DIM),
+            self.Block(BIGNET_DIM),
+            LayerNorm(BIGNET_DIM),
+            self.Block(BIGNET_DIM),
+            LayerNorm(BIGNET_DIM),
+            self.Block(BIGNET_DIM),
+            LayerNorm(BIGNET_DIM),
+            self.Block(BIGNET_DIM),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
