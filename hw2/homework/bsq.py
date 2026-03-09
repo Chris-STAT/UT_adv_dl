@@ -1,7 +1,7 @@
 import abc
 
 import torch
-
+import torch.nn.functional as F
 from .ae import PatchAutoEncoder
 
 
