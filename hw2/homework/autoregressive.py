@@ -53,12 +53,77 @@ class AutoregressiveModel(torch.nn.Module, Autoregressive):
     Hint: You can complete this homework without using positional embeddings
     """
 
+
+class AutoregressiveModel(torch.nn.Module, Autoregressive):
+    """
+    Implement an auto-regressive model.
+    The input is a set of patch tokens (integers), the output is an image of probability.
+    You need to implicitly shift your inputs by one position in the forward pass.
+    Make sure n_tokens matches your BSQ dimension (2**codebook_bits_).
+
+    Hint: You will need the torch.nn.Embedding function
+    Hint: You can use torch.nn.TransformerEncoderLayer if you'd like
+    Hint: You can complete this homework without using positional embeddings
+    """
+
     def __init__(self, d_latent: int = 128, n_tokens: int = 2**10):
         super().__init__()
-        raise NotImplementedError()
+        self.d_latent = d_latent
+        self.n_tokens = n_tokens
+
+        self.token_embedding = torch.nn.Embedding(n_tokens, d_latent)
+        self.bos = torch.nn.Parameter(torch.zeros(1, 1, d_latent))
+        self.pos_embedding = torch.nn.Embedding(1024, d_latent)
+
+        encoder_layer = torch.nn.TransformerEncoderLayer(
+            d_model=d_latent,
+            nhead=8,
+            dim_feedforward=4 * d_latent,
+            dropout=0.1,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = torch.nn.TransformerEncoder(encoder_layer, num_layers=4)
+        self.ln_f = torch.nn.LayerNorm(d_latent)
+        self.head = torch.nn.Linear(d_latent, n_tokens)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        raise NotImplementedError()
+        B, h, w = x.shape
+        T = h * w
 
+        x = x.long().view(B, T)
+
+        tok = self.token_embedding(x)  # (B, T, d)
+
+        # Shift right by one:
+        # output at position t predicts token x_t using only tokens before t
+        shifted = torch.cat([self.bos.expand(B, 1, -1), tok[:, :-1]], dim=1)
+
+        pos = self.pos_embedding(torch.arange(T, device=x.device))[None, :, :]
+        inp = shifted + pos
+
+        causal_mask = torch.nn.Transformer.generate_square_subsequent_mask(T, device=x.device)
+        hidden = self.transformer(inp, mask=causal_mask, is_causal=True)
+        hidden = self.ln_f(hidden)
+
+        logits = self.head(hidden)  # (B, T, n_tokens)
+        logits = logits.view(B, h, w, self.n_tokens)
+
+        return logits, {}
+
+    @torch.no_grad()
     def generate(self, B: int = 1, h: int = 30, w: int = 20, device=None) -> torch.Tensor:  # noqa
-        raise NotImplementedError()
+        if device is None:
+            device = next(self.parameters()).device
+
+        T = h * w
+        seq = torch.zeros(B, T, dtype=torch.long, device=device)
+
+        for t in range(T):
+            logits, _ = self.forward(seq.view(B, h, w))
+            logits_t = logits.view(B, T, self.n_tokens)[:, t, :]
+            probs = torch.softmax(logits_t, dim=-1)
+            seq[:, t] = torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+        return seq.view(B, h, w)
