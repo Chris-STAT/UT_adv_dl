@@ -1,46 +1,50 @@
 import json
 from pathlib import Path
+from tqdm import tqdm
 
 from .cot import CoTModel
-from .data import Dataset, is_answer_valid
-
+from .data import Dataset
 
 def generate_dataset(output_json: str, oversample: int = 10, temperature: float = 0.6):
     model = CoTModel()
-    trainset = Dataset("train")
+    dataset = Dataset("train")
 
-    questions = [item[0] for item in trainset]
-    correct_answers = [item[1] for item in trainset]
-    prompts = [model.format_prompt(q) for q in questions]
+    results = []
 
-    generations = model.batched_generate(
-        prompts,
-        num_return_sequences=oversample,
-        temperature=temperature,
-    )
+    for question, true_answer in tqdm(dataset, desc="Generating CoT answers"):
+        prompt = model.format_prompt(question)
 
-    output_data = []
-    success = 0
+        try:
+            generations = model.batched_generate(
+                [prompt],
+                num_return_sequences=oversample,
+                temperature=temperature
+            )[0]  # list[str] for a single prompt
+        except Exception as e:
+            print(f"Skipping question due to error: {e}")
+            continue
 
-    for question, correct_answer, cand_list in zip(questions, correct_answers, generations):
-        chosen = None
-        for g in cand_list:
-            parsed = model.parse_answer(g)
-            if parsed == parsed and is_answer_valid(parsed, correct_answer):
-                chosen = g.strip()
-                break
+        found = False
+        for reasoning in generations:
+            try:
+                predicted = model.parse_answer(reasoning)
+                if abs(predicted - float(true_answer)) / max(abs(float(true_answer)), 1e-8) < 1e-3:
+                    results.append([question, float(true_answer), reasoning])
+                    found = True
+                    break
+            except Exception:
+                continue
 
-        if chosen is not None:
-            output_data.append([question, correct_answer, chosen])
-            success += 1
+        if not found:
+            continue  # skip if no correct answer found in sampled generations
 
+    print(f"Generated {len(results)} valid reasoning samples out of {len(dataset)}")
+
+    # Save to output_json
     output_path = Path(output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w") as f:
-        json.dump(output_data, f, indent=2)
-
-    print(f"saved {len(output_data)} examples to {output_json}")
-    print(f"success rate: {success / len(trainset):.3f}")
+    with open(output_path, "w") as f:
+        json.dump(results, f, indent=2)
 
 
 if __name__ == "__main__":
