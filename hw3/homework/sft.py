@@ -88,8 +88,8 @@ def train_model(
 
     # LoRA config
     peft_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
+        r=20,
+        lora_alpha=80,
         target_modules="all-linear",
         bias="none",
         task_type="CAUSAL_LM",
