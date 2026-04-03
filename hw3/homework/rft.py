@@ -1,144 +1,125 @@
 from .base_llm import BaseLLM
 from .sft import test_model
-
+from pathlib import Path
+import torch
+from transformers import TrainingArguments, Trainer
+from peft import get_peft_model, LoraConfig, TaskType
 
 def load() -> BaseLLM:
     from pathlib import Path
+
     from peft import PeftModel
 
-    model_path = Path(__file__).parent / "rft_model"
+    model_name = "rft_model"
+    model_path = Path(__file__).parent / model_name
 
     llm = BaseLLM()
-    llm.model = PeftModel.from_pretrained(
-        llm.model,
-        str(model_path)  
-    ).to(llm.device)
-
+    llm.model = PeftModel.from_pretrained(llm.model, model_path).to(llm.device)
     llm.model.eval()
+
     return llm
 
+# BASE_MODEL_NAME = "HuggingFaceTB/SmolLM2-360M-Instruct"
+
+# def get_tokenizer_and_model():
+#     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
+#     model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_NAME).to(device)
+#     return tokenizer, model
 
 def train_model(
     output_dir: str,
-    data_path: str = "data/rft.json",
-    learning_rate: float = 1e-4,
-    num_train_epochs: int = 5,
-    per_device_train_batch_size: int = 32,
-    lora_rank: int = 16,
-    lora_alpha: int = 64,
-    max_length: int = 192,
     **kwargs,
 ):
-    """
-    Train an RFT model on question / reasoning / answer triples saved in data/rft.json.
-
-    Expected JSON format:
-    [
-      ["question text", 6000.0, "1 kg = 1000 grams. 6 * 1000 = <answer>6000</answer>"],
-      ...
-    ]
-    """
-    import json
-    from pathlib import Path
-
-    from peft import LoraConfig, get_peft_model
-    from transformers import Trainer, TrainingArguments
-
+    # Reuse much of the SFT code here
+    # raise NotImplementedError()
+    # Load base model and tokenizer
     llm = BaseLLM()
+    tokenizer = llm.tokenizer
 
-    # LoRA setup
-    peft_config = LoraConfig(
-        r=lora_rank,
+    # LoRA config (larger rank for RFT, alpha ~4*r)
+    r = 16
+    lora_alpha = 64
+    lora_config = LoraConfig(
+        r=r,
         lora_alpha=lora_alpha,
         target_modules="all-linear",
         bias="none",
-        task_type="CAUSAL_LM",
+        task_type=TaskType.CAUSAL_LM,
     )
-    llm.model = get_peft_model(llm.model, peft_config)
 
-    # Helps with gradient checkpointing on GPU
-    if llm.device == "cuda":
+    llm.model = get_peft_model(llm.model, lora_config)
+    if torch.cuda.is_available():
         llm.model.enable_input_require_grads()
 
-    # Load generated RFT data
-    data_path = Path(data_path)
-    with data_path.open() as f:
+    # Load RFT dataset
+    import json
+    train_path = Path(__file__).parent / "data" / "rft.json"
+    with open(train_path, "r") as f:
         rft_data = json.load(f)
 
-    def tokenize(tokenizer, question: str, answer: str):
-        """
-        Tokenize prompt + target and supervise only the target tokens.
-        """
-        full_text = f"{question} {answer}{tokenizer.eos_token}"
+    # Each entry: [question, correct_answer, reasoning]
+    def format_example(entry):
+        question, _, reasoning = entry
+        return f"{question}\n{reasoning}"
 
-        tokenizer.padding_side = "right"
-        tokenizer.pad_token = tokenizer.eos_token
-        full = tokenizer(full_text, padding="max_length", truncation=True, max_length=max_length)
-
-        input_ids = full["input_ids"]
-        question_len = len(tokenizer(question)["input_ids"])
-
-        labels = [-100] * question_len + input_ids[question_len:]
-
-        for i in range(len(labels)):
-            if full["attention_mask"][i] == 0:
-                labels[i] = -100
-
-        full["labels"] = labels
-        return full
-
-    def format_example(question: str, answer: float, reasoning: str) -> dict[str, str]:
-        """
-        Keep training-time prompt aligned with BaseLLM.format_prompt.
-        The target is the full reasoning trace ending in <answer>...</answer>.
-        """
-        return {
-            "question": llm.format_prompt(question),
-            "answer": reasoning.strip(),
-        }
-
-    class TokenizedRFTDataset:
-        def __init__(self, tokenizer, data):
-            self.tokenizer = tokenizer
-            self.data = data
-
+    class Dataset:
+        def __init__(self):
+            self.data = rft_data
+        def __getitem__(self, idx):
+            return self.data[idx]
         def __len__(self):
             return len(self.data)
 
+    class TokenizedDataset(torch.utils.data.Dataset):
+        def __init__(self, tokenizer, dataset, format_example):
+            self.tokenizer = tokenizer
+            self.dataset = dataset
+            self.format_example = format_example
         def __getitem__(self, idx):
-            q, a, reasoning = self.data[idx]
-            formatted = format_example(q, a, reasoning)
-            return tokenize(self.tokenizer, **formatted)
+            txt = self.format_example(self.dataset[idx])
+            tokens = self.tokenizer(
+                txt,
+                truncation=True,
+                padding="max_length",
+                max_length=384,
+                return_tensors="pt",
+            )
+            tokens = {k: v.squeeze(0) for k, v in tokens.items()}
+            tokens["labels"] = tokens["input_ids"].clone()
+            return tokens
+        def __len__(self):
+            return len(self.dataset)
 
-    train_dataset = TokenizedRFTDataset(llm.tokenizer, rft_data)
+    trainset = Dataset()
+    tokenized_dataset = TokenizedDataset(tokenizer, trainset, format_example)
 
     training_args = TrainingArguments(
         output_dir=output_dir,
         logging_dir=output_dir,
         report_to="tensorboard",
-        learning_rate=learning_rate,
-        num_train_epochs=num_train_epochs,
-        per_device_train_batch_size=per_device_train_batch_size,
+        num_train_epochs=9,
+        per_device_train_batch_size=32,
         gradient_checkpointing=True,
+        learning_rate=3e-3,
+        save_total_limit=1,
         save_strategy="epoch",
-        logging_steps=10,
+        eval_strategy="no",
+        logging_strategy="epoch",
         remove_unused_columns=False,
     )
 
     trainer = Trainer(
         model=llm.model,
         args=training_args,
-        train_dataset=train_dataset,
+        train_dataset=tokenized_dataset,
+        tokenizer=tokenizer,
     )
 
     trainer.train()
 
-    final_dir = Path(__file__).parent / "rft_model"
-    final_dir.mkdir(parents=True, exist_ok=True)
-    llm.model.save_pretrained(final_dir)
-
-    test_model(str(final_dir))
-
+    save_path = Path(output_dir)
+    trainer.save_model(save_path)
+    test_model(str(save_path))
 
 if __name__ == "__main__":
     from fire import Fire
