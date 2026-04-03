@@ -15,8 +15,8 @@ class BaseLLM:
         self.model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
         self.device = device
 
-    def format_prompt(self, question: str) -> str:
-        return question
+def format_prompt(self, question: str) -> str:
+    return f"{question} Answer with <answer>NUMBER</answer>."
 
     
 
