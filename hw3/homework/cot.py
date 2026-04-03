@@ -1,37 +1,38 @@
 from .base_llm import BaseLLM
 
 
+
 class CoTModel(BaseLLM):
     def format_prompt(self, question: str) -> str:
-        """
-        Take a question and convert it into a chat template. The LLM will likely answer much
-        better if you provide a chat template. self.tokenizer.apply_chat_template can help here
-        """
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
                 "content": (
-                    "You solve unit conversion problems. "
-                    "Be concise. "
-                    "Show a short calculation and finish with the final result inside "
-                    "<answer></answer>."
+                    "You are a careful unit conversion assistant. "
+                    "Solve the problem briefly. "
+                    "Show only a short reasoning if needed. "
+                    "Always end with the final numeric answer inside <answer></answer>. "
+                    "Do not omit the tags."
                 ),
             },
             {
                 "role": "user",
-                "content": "How many centimeters are there in 2 meters?",
+                "content": "How many grams are there in 6 kg?",
             },
             {
                 "role": "assistant",
                 "content": (
-                    "1 meter = 100 centimeters. "
-                    "So 2 × 100 = 200. "
-                    "<answer>200</answer>"
+                    "1 kg = 1000 grams. "
+                    "So 6 × 1000 = 6000. "
+                    "<answer>6000</answer>"
                 ),
             },
             {
                 "role": "user",
-                "content": question,
+                "content": (
+                    f"{question}\n"
+                    "Respond with the final numeric answer inside <answer></answer>."
+                ),
             },
         ]
 
@@ -40,7 +41,6 @@ class CoTModel(BaseLLM):
             add_generation_prompt=True,
             tokenize=False,
         )
-
 
 def load() -> CoTModel:
     return CoTModel()
