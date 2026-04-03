@@ -1,109 +1,111 @@
+from pathlib import Path
+import json
+
+import torch
+from transformers import Trainer, TrainingArguments
+from peft import PeftModel, get_peft_model, LoraConfig, TaskType
+
 from .base_llm import BaseLLM
 from .sft import test_model
-from pathlib import Path
-import torch
-from transformers import TrainingArguments, Trainer
-from peft import get_peft_model, LoraConfig, TaskType
+
 
 def load() -> BaseLLM:
-    from pathlib import Path
-
-    from peft import PeftModel
-
-    model_name = "rft_model"
-    model_path = Path(__file__).parent / model_name
+    model_path = Path(__file__).parent / "rft_model"
 
     llm = BaseLLM()
-    llm.model = PeftModel.from_pretrained(llm.model, model_path).to(llm.device)
+    llm.model = PeftModel.from_pretrained(
+        llm.model,
+        str(model_path),
+    ).to(llm.device)
     llm.model.eval()
-
     return llm
 
-# BASE_MODEL_NAME = "HuggingFaceTB/SmolLM2-360M-Instruct"
-
-# def get_tokenizer_and_model():
-#     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
-#     model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_NAME).to(device)
-#     return tokenizer, model
 
 def train_model(
     output_dir: str,
+    data_path: str | None = None,
+    lora_rank: int = 16,
+    lora_alpha: int = 64,
+    learning_rate: float = 1e-4,
+    num_train_epochs: int = 3,
+    per_device_train_batch_size: int = 32,
+    max_length: int = 256,
     **kwargs,
 ):
-    # Reuse much of the SFT code here
-    # raise NotImplementedError()
-    # Load base model and tokenizer
     llm = BaseLLM()
     tokenizer = llm.tokenizer
 
-    # LoRA config (larger rank for RFT, alpha ~4*r)
-    r = 16
-    lora_alpha = 64
     lora_config = LoraConfig(
-        r=r,
+        r=lora_rank,
         lora_alpha=lora_alpha,
         target_modules="all-linear",
         bias="none",
         task_type=TaskType.CAUSAL_LM,
     )
-
     llm.model = get_peft_model(llm.model, lora_config)
-    if torch.cuda.is_available():
+
+    if llm.device == "cuda":
         llm.model.enable_input_require_grads()
 
-    # Load RFT dataset
-    import json
-    train_path = Path(__file__).parent / "data" / "rft.json"
-    with open(train_path, "r") as f:
+    if data_path is None:
+        data_path = str(Path(__file__).parent.parent / "data" / "rft.json")
+
+    with open(data_path, "r") as f:
         rft_data = json.load(f)
 
-    # Each entry: [question, correct_answer, reasoning]
-    def format_example(entry):
-        question, _, reasoning = entry
-        return f"{question}\n{reasoning}"
+    def tokenize_example(question: str, reasoning: str):
+        prompt = llm.format_prompt(question)
+        full_text = f"{prompt} {reasoning}{tokenizer.eos_token}"
 
-    class Dataset:
-        def __init__(self):
-            self.data = rft_data
-        def __getitem__(self, idx):
-            return self.data[idx]
+        tokenizer.padding_side = "right"
+        tokenizer.pad_token = tokenizer.eos_token
+
+        full = tokenizer(
+            full_text,
+            truncation=True,
+            padding="max_length",
+            max_length=max_length,
+        )
+
+        prompt_len = len(tokenizer(prompt)["input_ids"])
+
+        labels = [-100] * prompt_len + full["input_ids"][prompt_len:]
+
+        if len(labels) < len(full["input_ids"]):
+            labels += [-100] * (len(full["input_ids"]) - len(labels))
+        else:
+            labels = labels[: len(full["input_ids"])]
+
+        for i in range(len(labels)):
+            if full["attention_mask"][i] == 0:
+                labels[i] = -100
+
+        full["labels"] = labels
+        return full
+
+    class TokenizedDataset(torch.utils.data.Dataset):
+        def __init__(self, data):
+            self.data = data
+
         def __len__(self):
             return len(self.data)
 
-    class TokenizedDataset(torch.utils.data.Dataset):
-        def __init__(self, tokenizer, dataset, format_example):
-            self.tokenizer = tokenizer
-            self.dataset = dataset
-            self.format_example = format_example
         def __getitem__(self, idx):
-            txt = self.format_example(self.dataset[idx])
-            tokens = self.tokenizer(
-                txt,
-                truncation=True,
-                padding="max_length",
-                max_length=384,
-                return_tensors="pt",
-            )
-            tokens = {k: v.squeeze(0) for k, v in tokens.items()}
-            tokens["labels"] = tokens["input_ids"].clone()
-            return tokens
-        def __len__(self):
-            return len(self.dataset)
+            question, _, reasoning = self.data[idx]
+            return tokenize_example(question, reasoning.strip())
 
-    trainset = Dataset()
-    tokenized_dataset = TokenizedDataset(tokenizer, trainset, format_example)
+    train_dataset = TokenizedDataset(rft_data)
 
     training_args = TrainingArguments(
         output_dir=output_dir,
         logging_dir=output_dir,
         report_to="tensorboard",
-        num_train_epochs=9,
-        per_device_train_batch_size=32,
+        learning_rate=learning_rate,
+        num_train_epochs=num_train_epochs,
+        per_device_train_batch_size=per_device_train_batch_size,
         gradient_checkpointing=True,
-        learning_rate=3e-3,
-        save_total_limit=1,
         save_strategy="epoch",
-        eval_strategy="no",
+        save_total_limit=1,
         logging_strategy="epoch",
         remove_unused_columns=False,
     )
@@ -111,15 +113,18 @@ def train_model(
     trainer = Trainer(
         model=llm.model,
         args=training_args,
-        train_dataset=tokenized_dataset,
+        train_dataset=train_dataset,
         tokenizer=tokenizer,
     )
 
     trainer.train()
 
-    save_path = Path(output_dir)
-    trainer.save_model(save_path)
-    test_model(str(save_path))
+    final_dir = Path(__file__).parent / "rft_model"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    llm.model.save_pretrained(final_dir)
+
+    test_model(str(final_dir))
+
 
 if __name__ == "__main__":
     from fire import Fire
