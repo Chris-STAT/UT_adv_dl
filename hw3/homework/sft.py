@@ -46,12 +46,9 @@ def tokenize(tokenizer, question: str, answer: str):
 
 
 def format_example(prompt: str, answer: str) -> dict[str, str]:
-    """
-    Construct a question / answer pair. Consider rounding the answer to make it easier for the LLM.
-    """
     rounded_answer = round(float(answer), 3)
     return {
-        "question": prompt,
+        "question": f"{prompt} Answer with <answer>NUMBER</answer>.",
         "answer": f"<answer>{rounded_answer}</answer>",
     }
 
@@ -111,8 +108,8 @@ def train_model(
         output_dir=output_dir,
         logging_dir=output_dir,
         report_to="tensorboard",
-        learning_rate=2e-4,
-        num_train_epochs=3,
+        learning_rate=1e-4,
+        num_train_epochs=10,
         per_device_train_batch_size=32,
         gradient_checkpointing=True,
         save_strategy="epoch",
