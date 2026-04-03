@@ -45,13 +45,13 @@ def tokenize(tokenizer, question: str, answer: str):
     return full
 
 
+
 def format_example(prompt: str, answer: str) -> dict[str, str]:
-    rounded_answer = round(float(answer), 3)
+    answer = round(float(answer), 3)
     return {
         "question": f"{prompt} Answer with <answer>NUMBER</answer>.",
-        "answer": f"<answer>{rounded_answer}</answer>",
+        "answer": f"<answer>{answer}</answer>",
     }
-
 
 class TokenizedDataset:
     def __init__(self, tokenizer, data: Dataset, format_fn):

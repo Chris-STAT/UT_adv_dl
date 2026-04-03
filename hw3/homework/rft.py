@@ -4,16 +4,17 @@ from .sft import test_model
 
 def load() -> BaseLLM:
     from pathlib import Path
-
     from peft import PeftModel
 
-    model_name = "rft_model"
-    model_path = Path(__file__).parent / model_name
+    model_path = Path(__file__).parent / "rft_model"
 
     llm = BaseLLM()
-    llm.model = PeftModel.from_pretrained(llm.model, model_path).to(llm.device)
-    llm.model.eval()
+    llm.model = PeftModel.from_pretrained(
+        llm.model,
+        str(model_path)  
+    ).to(llm.device)
 
+    llm.model.eval()
     return llm
 
 
