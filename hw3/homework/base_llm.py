@@ -1,4 +1,5 @@
-from typing import overload
+from typing import 
+import re
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -17,11 +18,33 @@ class BaseLLM:
     def format_prompt(self, question: str) -> str:
         return question
 
+    
+
     def parse_answer(self, answer: str) -> float:
+        """
+        Parse the <answer></answer> tag and return a float.
+        Be robust to slightly malformed closing tags like </answer
+        and to extra trailing text.
+        """
         try:
-            return float(answer.split("<answer>")[1].split("</answer>")[0])
-        except (IndexError, ValueError):
-            return float("nan")
+           # First try the normal well-formed case
+           m = re.search(r"<answer>\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*</answer>", answer)
+           if m:
+              return float(m.group(1))
+
+           # Fallback: tolerate missing '>' in closing tag
+           m = re.search(r"<answer>\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*</answer?", answer)
+           if m:
+              return float(m.group(1))
+
+           # Fallback: if model started the answer tag but never closed it
+           m = re.search(r"<answer>\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", answer)
+           if m:
+              return float(m.group(1))
+
+           return float("nan")
+        except (ValueError, TypeError):
+           return float("nan")
 
     def generate(self, prompt: str) -> str:
         """
