@@ -24,7 +24,7 @@ def train_model(
     lora_rank: int = 16,
     lora_alpha: int = 64,
     learning_rate: float = 1e-4,
-    num_train_epochs: int = 3,
+    num_train_epochs: int = 5,
     per_device_train_batch_size: int = 32,
     max_length: int = 384,
     **kwargs,
