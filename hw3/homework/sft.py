@@ -49,7 +49,11 @@ def format_example(prompt: str, answer: str) -> dict[str, str]:
     """
     Construct a question / answer pair. Consider rounding the answer to make it easier for the LLM.
     """
-    raise NotImplementedError()
+    rounded_answer = round(float(answer), 3)
+    return {
+        "question": prompt,
+        "answer": f"<answer>{rounded_answer}</answer>",
+    }
 
 
 class TokenizedDataset:
@@ -78,8 +82,57 @@ def train_model(
     output_dir: str,
     **kwargs,
 ):
-    raise NotImplementedError()
-    test_model(output_dir)
+    from pathlib import Path
+
+    from peft import LoraConfig, get_peft_model
+    from transformers import Trainer, TrainingArguments
+
+    llm = BaseLLM()
+
+    # LoRA config
+    peft_config = LoraConfig(
+        r=8,
+        lora_alpha=32,
+        target_modules="all-linear",
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
+    llm.model = get_peft_model(llm.model, peft_config)
+
+    # Helps avoid gradient checkpointing issues on GPU
+    if llm.device == "cuda":
+        llm.model.enable_input_require_grads()
+
+    trainset = Dataset("train")
+    tokenized_trainset = TokenizedDataset(llm.tokenizer, trainset, format_example)
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        logging_dir=output_dir,
+        report_to="tensorboard",
+        learning_rate=2e-4,
+        num_train_epochs=3,
+        per_device_train_batch_size=32,
+        gradient_checkpointing=True,
+        save_strategy="epoch",
+        logging_steps=10,
+        remove_unused_columns=False,
+    )
+
+    trainer = Trainer(
+        model=llm.model,
+        args=training_args,
+        train_dataset=tokenized_trainset,
+    )
+
+    trainer.train()
+
+    final_dir = Path(__file__).parent / "sft_model"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    llm.model.save_pretrained(final_dir)
+
+    test_model(str(final_dir))
 
 
 def test_model(ckpt_path: str):
