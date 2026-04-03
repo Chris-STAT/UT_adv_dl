@@ -7,7 +7,6 @@ from peft import get_peft_model, LoraConfig, TaskType
 
 
 def load() -> BaseLLM:
-    from pathlib import Path
     from peft import PeftModel
 
     model_name = "rft_model"
@@ -24,12 +23,10 @@ def train_model(
     output_dir: str,
     **kwargs,
 ):
-    # Reuse much of the SFT code here
-    # Load base model and tokenizer
     llm = BaseLLM()
     tokenizer = llm.tokenizer
 
-    # LoRA config (larger rank for RFT, alpha ~4*r)
+    # Keep your original LoRA settings
     r = 16
     lora_alpha = 64
     lora_config = LoraConfig(
@@ -44,16 +41,17 @@ def train_model(
     if torch.cuda.is_available():
         llm.model.enable_input_require_grads()
 
-    # Load RFT dataset
+    # Keep your original dataset loading style, but fix the likely path
     import json
-    train_path = Path(__file__).parent / "data" / "rft.json"
+    train_path = Path(__file__).parent.parent / "data" / "rft.json"
     with open(train_path, "r") as f:
         rft_data = json.load(f)
 
     # Each entry: [question, correct_answer, reasoning]
     def format_example(entry):
         question, _, reasoning = entry
-        return f"{question}\n{reasoning}"
+        prompt = llm.format_prompt(question)
+        return prompt, reasoning
 
     class Dataset:
         def __init__(self):
@@ -72,7 +70,9 @@ def train_model(
             self.format_example = format_example
 
         def __getitem__(self, idx):
-            txt = self.format_example(self.dataset[idx])
+            prompt, reasoning = self.format_example(self.dataset[idx])
+            txt = f"{prompt} {reasoning}{self.tokenizer.eos_token}"
+
             tokens = self.tokenizer(
                 txt,
                 truncation=True,
@@ -81,7 +81,15 @@ def train_model(
                 return_tensors="pt",
             )
             tokens = {k: v.squeeze(0) for k, v in tokens.items()}
-            tokens["labels"] = tokens["input_ids"].clone()
+
+            prompt_ids = self.tokenizer(prompt)["input_ids"]
+            prompt_len = len(prompt_ids)
+
+            labels = tokens["input_ids"].clone()
+            labels[:prompt_len] = -100
+            labels[tokens["attention_mask"] == 0] = -100
+            tokens["labels"] = labels
+
             return tokens
 
         def __len__(self):
@@ -90,6 +98,7 @@ def train_model(
     trainset = Dataset()
     tokenized_dataset = TokenizedDataset(tokenizer, trainset, format_example)
 
+    # Keep your original training hyperparameters
     training_args = TrainingArguments(
         output_dir=output_dir,
         logging_dir=output_dir,
@@ -123,7 +132,7 @@ def train_model(
     final_dir.mkdir(parents=True, exist_ok=True)
     llm.model.save_pretrained(final_dir)
 
-    test_model(str(save_path))
+    test_model(str(final_dir))
 
 
 if __name__ == "__main__":
