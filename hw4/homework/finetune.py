@@ -16,7 +16,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is
 processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM-256M-Instruct")
 
 
-def load(model_name: str = "vlm_model") -> BaseVLM:
+def load(model_name: str = "vlm_sft") -> BaseVLM:
     from pathlib import Path
 
     from peft import PeftModel
@@ -24,7 +24,7 @@ def load(model_name: str = "vlm_model") -> BaseVLM:
     model_path = Path(__file__).parent / model_name
 
     vlm = BaseVLM()
-    vlm.model = PeftModel.from_pretrained(vlm.model, model_path).to(vlm.device)
+    vlm.model = PeftModel.from_pretrained(vlm.model, str(model_path)).to(vlm.device)    
     vlm.model.eval()
 
     return vlm
