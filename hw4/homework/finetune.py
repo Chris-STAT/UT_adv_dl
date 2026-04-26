@@ -172,12 +172,14 @@ def train(
     # Prepare datasets
     if data_dir is not None:
         data_dir = Path(data_dir)
+    
+    train_dataset = VQADataset(train_dataset_name, data_dir)
     #train_dataset = VQADataset(train_dataset_name, data_dir, max_samples=20000)
-    full_dataset = VQADataset(train_dataset_name, data_dir)
+    #full_dataset = VQADataset(train_dataset_name, data_dir)
 
     
-    indices = random.sample(range(len(full_dataset)), 20000)
-    train_dataset = torch.utils.data.Subset(full_dataset, indices)
+    #indices = random.sample(range(len(full_dataset)), 20000)
+    #train_dataset = torch.utils.data.Subset(full_dataset, indices)
 
     train_dataset = VQADatasetForTraining(train_dataset, processor)
 
