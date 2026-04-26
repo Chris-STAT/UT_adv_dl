@@ -110,8 +110,10 @@ class CLIP(nn.Module):
         vision_dim = vision_encoder.config.hidden_size
         text_dim = text_encoder.config.hidden_size
 
-        self.image_proj = nn.Linear(vision_dim, proj_dim)
-        self.text_proj = nn.Linear(text_dim, proj_dim)
+        #self.image_proj = nn.Linear(vision_dim, proj_dim)
+        #self.text_proj = nn.Linear(text_dim, proj_dim)
+        self.image_proj = nn.Linear(vision_dim, proj_dim).to(vision_encoder.dtype)
+        self.text_proj = nn.Linear(text_dim, proj_dim).to(text_encoder.dtype)
 
         self.logit_scale = nn.Parameter(torch.ones([]) * 2.6592)
 
