@@ -15,13 +15,9 @@ from .base_vlm import BaseVLM
 from .data import CaptionDataset, MultiChoiceQADataset
 
 processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM-256M-Instruct")
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-# =========================
-# LOAD
-# =========================
 def load(model_name: str = "clip_model"):
     from peft import PeftModel
 
@@ -34,20 +30,22 @@ def load(model_name: str = "clip_model"):
     clip = CLIP(vision_encoder, text_encoder)
     clip = PeftModel.from_pretrained(clip, str(model_path)).to(device)
 
-    clip.model.load_pretrained(model_path)
+    clip.model.load_pretrained(str(model_path))
     clip.model.eval()
+
+    if device == "cuda":
+        clip = clip.to(dtype=torch.bfloat16)
 
     return clip
 
 
-# =========================
-# DATA COLLATOR
-# =========================
 def clip_data_collator(features: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     max_length = max(f["input_ids"].shape[0] for f in features)
 
     def pad_tensor(tensor, pad_value):
-        return torch.cat([tensor, torch.full((max_length - tensor.shape[0],), pad_value, dtype=tensor.dtype)])
+        return torch.cat(
+            [tensor, torch.full((max_length - tensor.shape[0],), pad_value, dtype=tensor.dtype)]
+        )
 
     input_ids = torch.stack([pad_tensor(f["input_ids"], processor.tokenizer.eos_token_id) for f in features])
     attention_mask = torch.stack([pad_tensor(f["attention_mask"], 0) for f in features])
@@ -62,108 +60,166 @@ def clip_data_collator(features: list[dict[str, torch.Tensor]]) -> dict[str, tor
     }
 
 
-# =========================
-# DATASET
-# =========================
 class CaptionDatasetForTraining(Dataset):
     def __init__(self, dataset: CaptionDataset, processor: AutoProcessor):
         self.dataset = dataset
+        self.image_processor = tv.transforms.Compose(
+            [
+                tv.transforms.Resize(192),
+                tv.transforms.RandomResizedCrop(192, scale=(0.5, 1.0)),
+                tv.transforms.ToTensor(),
+                tv.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            ]
+        )
         self.processor = processor
-
-        self.image_processor = tv.transforms.Compose([
-            tv.transforms.Resize(192),
-            tv.transforms.CenterCrop(192),
-            tv.transforms.ToTensor(),
-            tv.transforms.Normalize([0.5]*3, [0.5]*3),
-        ])
 
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> dict[str, Any]:
         item = self.dataset[idx]
-
         image = Image.open(item["image_path"]).convert("RGB")
         pixel_values = self.image_processor(image)
 
         text = item["caption"] + self.processor.tokenizer.eos_token
-        text_inputs = self.processor(text=text, return_tensors="pt")
+        text_inputs = self.processor(text=text, return_tensors="pt", padding=True, truncation=True)
+
+        input_ids = text_inputs["input_ids"].squeeze(0).long()
+        attention_mask = text_inputs["attention_mask"].squeeze(0)
 
         return {
             "pixel_values": pixel_values,
-            "input_ids": text_inputs["input_ids"].squeeze(0),
-            "attention_mask": text_inputs["attention_mask"].squeeze(0),
-            "labels": text_inputs["input_ids"].squeeze(0),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": input_ids,
         }
 
 
-# =========================
-# CLIP MODEL
-# =========================
 class CLIP(nn.Module):
-    def __init__(self, vision_encoder, text_encoder, proj_dim=256):
+    def __init__(
+        self,
+        vision_encoder: nn.Module,
+        text_encoder: nn.Module,
+        proj_dim: int = 64,
+        temperature: float = 0.07,
+    ):
         super().__init__()
-
         self.vision_encoder = vision_encoder
         self.text_encoder = text_encoder
 
         vision_dim = vision_encoder.config.hidden_size
         text_dim = text_encoder.config.hidden_size
 
-        #self.image_proj = nn.Linear(vision_dim, proj_dim)
-        #self.text_proj = nn.Linear(text_dim, proj_dim)
-        self.image_proj = nn.Linear(vision_dim, proj_dim).to(vision_encoder.dtype)
-        self.text_proj = nn.Linear(text_dim, proj_dim).to(text_encoder.dtype)
+        self.vision_projection = nn.Linear(vision_dim, proj_dim, bias=False)
+        self.text_projection = nn.Linear(text_dim, proj_dim, bias=False)
+        self.logit_scale = nn.Parameter(torch.tensor(1.0 / temperature).log())
 
-        self.logit_scale = nn.Parameter(torch.ones([]) * 2.6592)
+    def _vision_dtype(self):
+        return next(self.vision_encoder.parameters()).dtype
 
-    def encode_image(self, pixel_values):
-        out = self.vision_encoder(pixel_values=pixel_values)
-        feat = out.last_hidden_state[:, 0]
-        feat = self.image_proj(feat)
+    def _text_dtype(self):
+        return next(self.text_encoder.parameters()).dtype
+
+    def encode_image(self, image: torch.Tensor) -> torch.Tensor:
+        image = image.to(dtype=self._vision_dtype())
+        outputs = self.vision_encoder(pixel_values=image)
+
+        if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+            feat = outputs.pooler_output
+        else:
+            feat = outputs.last_hidden_state[:, 0]
+
+        self.vision_projection = self.vision_projection.to(device=feat.device, dtype=feat.dtype)
+        feat = self.vision_projection(feat)
         return F.normalize(feat, dim=-1)
 
-    def encode_text(self, input_ids, attention_mask):
-        out = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
-        feat = out.last_hidden_state[:, 0]
-        feat = self.text_proj(feat)
+    def encode_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
+        outputs = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
+        hidden = outputs.last_hidden_state
+
+        if attention_mask is not None:
+            lengths = attention_mask.sum(dim=1) - 1
+            feat = hidden[torch.arange(hidden.shape[0], device=hidden.device), lengths]
+        else:
+            feat = hidden[:, -1]
+
+        self.text_projection = self.text_projection.to(device=feat.device, dtype=feat.dtype)
+        feat = self.text_projection(feat)
         return F.normalize(feat, dim=-1)
-    
-    def forward(self, pixel_values=None, input_ids=None, attention_mask=None, labels=None, **kwargs):
+
+    def save_pretrained(self, save_directory: str, **kwargs):
+        additional_state_dict = {}
+        for name, param in self.named_parameters():
+            if "vision_encoder." in name or "text_encoder." in name:
+                continue
+            additional_state_dict[name] = param.data.detach().cpu()
+
+        Path(save_directory).mkdir(parents=True, exist_ok=True)
+        torch.save(additional_state_dict, Path(save_directory) / "additional_weights.pt")
+
+    def load_pretrained(self, load_directory: str, **kwargs):
+        additional_weights_path = Path(load_directory) / "additional_weights.pt"
+        if additional_weights_path.exists():
+            additional_state_dict = torch.load(additional_weights_path, map_location="cpu")
+
+            for name, param in self.named_parameters():
+                if "vision_encoder." in name or "text_encoder." in name:
+                    continue
+                if name in additional_state_dict:
+                    param.data = additional_state_dict[name].to(device=param.device, dtype=param.dtype)
+
+    def set_trainable_parameters(self):
+        for name, param in self.named_parameters():
+            if "vision_encoder." in name or "text_encoder." in name:
+                continue
+            param.requires_grad = True
+
+    def gradient_checkpointing_enable(self, **kwargs):
+        self.vision_encoder.gradient_checkpointing_enable(**kwargs)
+        self.text_encoder.gradient_checkpointing_enable(**kwargs)
+
+    def enable_input_require_grads(self):
+        def make_inputs_require_grads(module, input, output):
+            output.requires_grad_(True)
+
+        self.vision_encoder.embeddings.register_forward_hook(make_inputs_require_grads)
+        self.text_encoder.get_input_embeddings().register_forward_hook(make_inputs_require_grads)
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor = None,
+        input_ids: torch.Tensor = None,
+        attention_mask: torch.Tensor = None,
+        labels: torch.Tensor = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        vision_feature = None
+        text_feature = None
+        logits = None
 
         if pixel_values is not None:
-           pixel_values = pixel_values.to(self.vision_encoder.dtype)
-           image_features = self.encode_image(pixel_values)
-        else:
-           image_features = None
+            vision_feature = self.encode_image(pixel_values)
 
         if input_ids is not None:
-           text_features = self.encode_text(input_ids, attention_mask)
-        else:
-           text_features = None
+            text_feature = self.encode_text(input_ids, attention_mask)
 
-        if image_features is not None and text_features is not None:
-           logit_scale = self.logit_scale.exp()
-           logits = logit_scale * image_features @ text_features.T
-        else:
-           logits = None
+        if vision_feature is not None and text_feature is not None:
+            logit_scale = self.logit_scale.exp().clamp(max=100)
+            logit_scale = logit_scale.to(device=vision_feature.device, dtype=vision_feature.dtype)
+            logits = logit_scale * vision_feature @ text_feature.T
 
-        return image_features, text_features, logits
-
-    def save_pretrained(self, save_directory):
-        torch.save(self.state_dict(), Path(save_directory) / "clip.pt")
-
-    def load_pretrained(self, load_directory):
-        path = Path(load_directory) / "clip.pt"
-        if path.exists():
-            self.load_state_dict(torch.load(path))
+        return vision_feature, text_feature, logits
 
 
-# =========================
-# LOSS
-# =========================
-def compute_clip_loss(outputs, labels, num_items_in_batch=None):
+def compute_clip_loss(
+    outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    labels: torch.Tensor,
+    num_items_in_batch: int | None = None,
+) -> torch.Tensor:
     _, _, logits = outputs
+
+    if logits is None:
+        return torch.tensor(0.0, requires_grad=True, device=device)
 
     batch_size = logits.shape[0]
     target = torch.arange(batch_size, device=logits.device)
@@ -174,40 +230,81 @@ def compute_clip_loss(outputs, labels, num_items_in_batch=None):
     return (loss_i + loss_t) / 2
 
 
-# =========================
-# TRAIN
-# =========================
+def get_target_modules_for_lora(model: nn.Module) -> list[str]:
+    target_modules = []
+    for name, module in model.named_modules():
+        if (
+            isinstance(module, nn.Linear)
+            and ("vision_encoder" in name or "text_encoder" in name)
+            and "projection" not in name
+        ):
+            target_modules.append(name)
+    return target_modules
+
+
 def train(
-    output_dir="clip_model",
-    num_train_epochs=1,
-    per_device_train_batch_size=256,
-    learning_rate=5e-4,
+    data_dir: Path | None = None,
+    output_dir: str = "clip_model",
+    num_train_epochs: float = 0.05,
+    per_device_train_batch_size: int = 1024,
+    gradient_accumulation_steps: int = 1,
+    learning_rate: float = 5e-4,
+    num_workers: int = 16,
 ):
     vlm = BaseVLM()
+
+    output_dir = Path(__file__).parent / output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tensorboard_dir = output_dir / "tensorboard"
+    tensorboard_dir.mkdir(exist_ok=True)
+    writer = SummaryWriter(log_dir=tensorboard_dir)
 
     vision_encoder = vlm.model.model.vision_model
     text_encoder = vlm.model.model.text_model
 
     model = CLIP(vision_encoder, text_encoder).to(device)
+    if device == "cuda":
+        model = model.to(dtype=torch.bfloat16)
+
+    model.set_trainable_parameters()
 
     peft_config = LoraConfig(
         task_type=TaskType.FEATURE_EXTRACTION,
+        inference_mode=False,
         r=8,
         lora_alpha=32,
-        target_modules="all-linear",
+        lora_dropout=0.0,
+        target_modules=get_target_modules_for_lora(model),
+        bias="none",
     )
 
     model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
+    model.to(device)
+    model.train()
+    model.gradient_checkpointing_enable()
+    model.enable_input_require_grads()
 
-    train_dataset = CaptionDataset("train")
+    train_dataset = CaptionDataset("train", data_dir)
     train_dataset = CaptionDatasetForTraining(train_dataset, processor)
 
     training_args = TrainingArguments(
         output_dir=output_dir,
+        logging_dir=output_dir,
+        report_to="tensorboard",
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        gradient_checkpointing=True,
         learning_rate=learning_rate,
-        logging_steps=10,
+        bf16=True if device == "cuda" else False,
+        logging_steps=1,
+        save_strategy="steps",
+        save_steps=50,
+        save_total_limit=2,
+        label_names=["labels"],
+        dataloader_num_workers=num_workers,
     )
 
     trainer = Trainer(
@@ -223,51 +320,71 @@ def train(
     trainer.save_model(output_dir)
     model.model.save_pretrained(output_dir)
 
-    return model
+    writer.close()
+
+    return model, processor
 
 
-# =========================
-# TEST
-# =========================
-def test(ckpt_path, val_dataset="valid_grader"):
+def demo_train():
+    train(
+        data_dir=None,
+        output_dir="demo_clip",
+        num_train_epochs=1,
+        per_device_train_batch_size=2,
+        num_workers=1,
+        gradient_accumulation_steps=1,
+        learning_rate=1e-8,
+    )
+
+
+def test(ckpt_path: str, val_dataset: str = "valid_grader"):
     import tqdm
 
     testset = MultiChoiceQADataset(val_dataset)
-    clip = load(ckpt_path)
 
-    correct = 0
-    total = 0
+    clip = load(ckpt_path)
+    clip = clip.model.to(device)
+
+    image_processor = tv.transforms.Compose(
+        [
+            tv.transforms.Resize(192),
+            tv.transforms.CenterCrop(192),
+            tv.transforms.ToTensor(),
+            tv.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        ]
+    )
+
+    correct_count = 0
+    total_count = 0
 
     for pair in tqdm.tqdm(testset):
         image = Image.open(pair["image_path"]).convert("RGB")
-
-        pixel = tv.transforms.ToTensor()(image).unsqueeze(0).to(device)
+        pixel_values = image_processor(image).unsqueeze(0).to(device)
+        if device == "cuda":
+            pixel_values = pixel_values.to(dtype=torch.bfloat16)
 
         text_inputs = processor(
-            text=[c + processor.tokenizer.eos_token for c in pair["candidates"]],
+            text=[s + processor.tokenizer.eos_token for s in pair["candidates"]],
             return_tensors="pt",
             padding=True,
+            truncation=True,
         )
+        input_ids = text_inputs["input_ids"].long().to(device)
+        attention_mask = text_inputs["attention_mask"].to(device)
 
-        input_ids = text_inputs["input_ids"].to(device)
-        attn = text_inputs["attention_mask"].to(device)
+        vision_feature, text_feature, _ = clip(pixel_values, input_ids, attention_mask)
+        prediction = torch.matmul(vision_feature, text_feature.T).argmax(dim=-1)
 
-        img_feat, txt_feat, _ = clip(pixel, input_ids, attn)
+        if prediction.item() == pair["correct_index"]:
+            correct_count += 1
+        total_count += 1
 
-        pred = (img_feat @ txt_feat.T).argmax()
-
-        if pred == pair["correct_index"]:
-            correct += 1
-        total += 1
-
-    print("Accuracy:", correct / total)
+    print(f"Accuracy: {correct_count / total_count}")
 
 
-# =========================
-# MAIN
-# =========================
 def main():
     from fire import Fire
+
     Fire({"train": train, "test": test})
 
 
