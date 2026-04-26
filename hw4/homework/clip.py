@@ -286,6 +286,9 @@ def train(
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
 
+    if data_dir is not None:
+        data_dir = Path(data_dir)
+
     train_dataset = CaptionDataset("train", data_dir)
     train_dataset = CaptionDatasetForTraining(train_dataset, processor)
 
