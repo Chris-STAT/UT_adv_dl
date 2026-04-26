@@ -128,14 +128,25 @@ class CLIP(nn.Module):
         feat = out.last_hidden_state[:, 0]
         feat = self.text_proj(feat)
         return F.normalize(feat, dim=-1)
-
+    
     def forward(self, pixel_values=None, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        pixel_values = pixel_values.to(self.vision_encoder.dtype)
-        image_features = self.encode_image(pixel_values)
-        text_features = self.encode_text(input_ids, attention_mask)
 
-        logit_scale = self.logit_scale.exp()
-        logits = logit_scale * image_features @ text_features.T
+        if pixel_values is not None:
+           pixel_values = pixel_values.to(self.vision_encoder.dtype)
+           image_features = self.encode_image(pixel_values)
+        else:
+           image_features = None
+
+        if input_ids is not None:
+           text_features = self.encode_text(input_ids, attention_mask)
+        else:
+           text_features = None
+
+        if image_features is not None and text_features is not None:
+           logit_scale = self.logit_scale.exp()
+           logits = logit_scale * image_features @ text_features.T
+        else:
+           logits = None
 
         return image_features, text_features, logits
 
