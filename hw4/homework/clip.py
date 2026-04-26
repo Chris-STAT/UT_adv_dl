@@ -127,7 +127,7 @@ class CLIP(nn.Module):
         feat = self.text_proj(feat)
         return F.normalize(feat, dim=-1)
 
-    def forward(self, pixel_values, input_ids, attention_mask=None, labels=None):
+    def forward(self, pixel_values=None, input_ids=None, attention_mask=None, labels=None, **kwargs):
         image_features = self.encode_image(pixel_values)
         text_features = self.encode_text(input_ids, attention_mask)
 
