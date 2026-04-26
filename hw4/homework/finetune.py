@@ -169,6 +169,8 @@ def train(
     model.train()
 
     # Prepare datasets
+    if data_dir is not None:
+        data_dir = Path(data_dir)
     train_dataset = VQADataset(train_dataset_name, data_dir)
 
     train_dataset = VQADatasetForTraining(train_dataset, processor)
