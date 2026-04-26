@@ -10,6 +10,7 @@ from transformers import AutoProcessor, Trainer, TrainingArguments
 
 from .base_vlm import BaseVLM
 from .data import VQADataset, benchmark
+import random
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -171,7 +172,12 @@ def train(
     # Prepare datasets
     if data_dir is not None:
         data_dir = Path(data_dir)
-    train_dataset = VQADataset(train_dataset_name, data_dir, max_samples=20000)
+    #train_dataset = VQADataset(train_dataset_name, data_dir, max_samples=20000)
+    full_dataset = VQADataset(train_dataset_name, data_dir)
+
+    
+    indices = random.sample(range(len(full_dataset)), 20000)
+    train_dataset = torch.utils.data.Subset(full_dataset, indices)
 
     train_dataset = VQADatasetForTraining(train_dataset, processor)
 
