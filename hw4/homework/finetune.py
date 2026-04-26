@@ -171,7 +171,7 @@ def train(
     # Prepare datasets
     if data_dir is not None:
         data_dir = Path(data_dir)
-    train_dataset = VQADataset(train_dataset_name, data_dir, max_samples=50000)
+    train_dataset = VQADataset(train_dataset_name, data_dir, max_samples=20000)
 
     train_dataset = VQADatasetForTraining(train_dataset, processor)
 
